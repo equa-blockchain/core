@@ -1,0 +1,363 @@
+
+services:
+  # Bootnode - para discovery
+  bootnode:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: equa-bootnode
+    networks:
+      equa-network:
+        ipv4_address: 172.25.0.10
+    volumes:
+      - ./genesis:/genesis
+      - ./bootnode:/bootnode
+      - bootnode-data:/data
+    entrypoint: ["/usr/local/bin/entrypoint.sh"]
+    command: >
+      --datadir /data
+      --networkid 3782
+      --nodekey /bootnode/nodekey
+      --netrestrict 172.25.0.0/24
+      --port 30303
+      --nat extip:172.25.0.10
+      --verbosity 4
+    ports:
+      - "30303:30303"
+      - "30303:30303/udp"
+
+  # Validador 1 - Bootstrap
+  validator1:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: equa-validator1
+    depends_on:
+      - bootnode
+    networks:
+      equa-network:
+        ipv4_address: 172.25.0.101
+    volumes:
+      - ./genesis:/genesis
+      - ./validator/validator1:/keys
+      - validator1-data:/data
+    environment:
+      - VALIDATOR_ID=1
+      - VALIDATOR_NAME=validator1
+      - BOOTNODE_IP=172.25.0.10
+    entrypoint: ["/usr/local/bin/validator-entrypoint.sh"]
+    command: >
+      --datadir /data
+      --networkid 3782
+      --bootnodes enode://08d12d1f37cdfb785f5b649b6fab14c7208cb24ed8ce04ab29ced783af462b2c0126c870b49d99c94088179dfc5d3d75e62508c95873f1453c3474edb99c4927@172.25.0.10:30303
+      --port 30303
+      --nat extip:172.25.0.101
+      --http
+      --http.addr 0.0.0.0
+      --http.port 8545
+      --http.api eth,web3,net,admin,debug,txpool,miner
+      --http.corsdomain "*"
+      --http.vhosts "*"
+      --ws
+      --ws.addr 0.0.0.0
+      --ws.port 8546
+      --ws.api eth,web3,net,admin,debug,txpool,miner
+      --ws.origins "*"
+      --allow-insecure-unlock
+      --netrestrict 172.25.0.0/24
+      --authrpc.addr 0.0.0.0
+      --authrpc.port 8551
+      --authrpc.vhosts "*"
+      --mine
+      --miner.etherbase 0x0000000000000000000000000000000000000001
+      --verbosity 4
+    ports:
+      - "8545:8545"
+      - "8546:8546"
+      - "30304:30303"
+
+  # Validador 2
+  validator2:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: equa-validator2
+    depends_on:
+      - bootnode
+      - validator1
+    networks:
+      equa-network:
+        ipv4_address: 172.25.0.102
+    volumes:
+      - ./genesis:/genesis
+      - ./validator/validator2:/keys
+      - validator2-data:/data
+    environment:
+      - VALIDATOR_ID=2
+      - VALIDATOR_NAME=validator2
+      - BOOTNODE_IP=172.25.0.10
+    entrypoint: ["/usr/local/bin/validator-entrypoint.sh"]
+    command: >
+      --datadir /data
+      --networkid 3782
+      --bootnodes enode://08d12d1f37cdfb785f5b649b6fab14c7208cb24ed8ce04ab29ced783af462b2c0126c870b49d99c94088179dfc5d3d75e62508c95873f1453c3474edb99c4927@172.25.0.10:30303
+      --port 30303
+      --nat extip:172.25.0.102
+      --http
+      --http.addr 0.0.0.0
+      --http.port 8545
+      --http.api eth,web3,net,admin,debug,txpool,miner
+      --http.corsdomain "*"
+      --http.vhosts "*"
+      --netrestrict 172.25.0.0/24
+      --mine
+      --miner.etherbase 0x0000000000000000000000000000000000000002
+      --verbosity 4
+    ports:
+      - "8547:8545"
+      - "30305:30303"
+
+  # Validador 3
+  validator3:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: equa-validator3
+    depends_on:
+      - bootnode
+      - validator1
+    networks:
+      equa-network:
+        ipv4_address: 172.25.0.103
+    volumes:
+      - ./genesis:/genesis
+      - ./validator/validator3:/keys
+      - validator3-data:/data
+    environment:
+      - VALIDATOR_ID=3
+      - VALIDATOR_NAME=validator3
+      - BOOTNODE_IP=172.25.0.10
+    entrypoint: ["/usr/local/bin/validator-entrypoint.sh"]
+    command: >
+      --datadir /data
+      --networkid 3782
+      --bootnodes enode://08d12d1f37cdfb785f5b649b6fab14c7208cb24ed8ce04ab29ced783af462b2c0126c870b49d99c94088179dfc5d3d75e62508c95873f1453c3474edb99c4927@172.25.0.10:30303
+      --port 30303
+      --nat extip:172.25.0.103
+      --http
+      --http.addr 0.0.0.0
+      --http.port 8545
+      --http.api eth,web3,net,admin,debug,txpool,miner
+      --http.corsdomain "*"
+      --http.vhosts "*"
+      --netrestrict 172.25.0.0/24
+      --mine
+      --miner.etherbase 0x0000000000000000000000000000000000000003
+      --verbosity 4
+    ports:
+      - "8548:8545"
+      - "30306:30303"
+
+  # Validador 4
+  validator4:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: equa-validator4
+    depends_on:
+      - bootnode
+      - validator1
+    networks:
+      equa-network:
+        ipv4_address: 172.25.0.104
+    volumes:
+      - ./genesis:/genesis
+      - ./validator/validator4:/keys
+      - validator4-data:/data
+    environment:
+      - VALIDATOR_ID=4
+      - VALIDATOR_NAME=validator4
+      - BOOTNODE_IP=172.25.0.10
+    entrypoint: ["/usr/local/bin/validator-entrypoint.sh"]
+    command: >
+      --datadir /data
+      --networkid 3782
+      --bootnodes enode://08d12d1f37cdfb785f5b649b6fab14c7208cb24ed8ce04ab29ced783af462b2c0126c870b49d99c94088179dfc5d3d75e62508c95873f1453c3474edb99c4927@172.25.0.10:30303
+      --port 30303
+      --nat extip:172.25.0.104
+      --http
+      --http.addr 0.0.0.0
+      --http.port 8545
+      --http.api eth,web3,net,admin,debug,txpool,miner
+      --http.corsdomain "*"
+      --http.vhosts "*"
+      --netrestrict 172.25.0.0/24
+      --mine
+      --miner.etherbase 0x0000000000000000000000000000000000000004
+      --verbosity 4
+    ports:
+      - "8549:8545"
+      - "30307:30303"
+
+  # Validador 5
+  validator5:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: equa-validator5
+    depends_on:
+      - bootnode
+      - validator1
+    networks:
+      equa-network:
+        ipv4_address: 172.25.0.105
+    volumes:
+      - ./genesis:/genesis
+      - ./validator/validator5:/keys
+      - validator5-data:/data
+    environment:
+      - VALIDATOR_ID=5
+      - VALIDATOR_NAME=validator5
+      - BOOTNODE_IP=172.25.0.10
+    entrypoint: ["/usr/local/bin/validator-entrypoint.sh"]
+    command: >
+      --datadir /data
+      --networkid 3782
+      --bootnodes enode://08d12d1f37cdfb785f5b649b6fab14c7208cb24ed8ce04ab29ced783af462b2c0126c870b49d99c94088179dfc5d3d75e62508c95873f1453c3474edb99c4927@172.25.0.10:30303
+      --port 30303
+      --nat extip:172.25.0.105
+      --http
+      --http.addr 0.0.0.0
+      --http.port 8545
+      --http.api eth,web3,net,admin,debug,txpool,miner
+      --http.corsdomain "*"
+      --http.vhosts "*"
+      --netrestrict 172.25.0.0/24
+      --mine
+      --miner.etherbase 0x0000000000000000000000000000000000000005
+      --verbosity 4
+    ports:
+      - "8550:8545"
+      - "30308:30303"
+
+  # Beacon Mock 1 - EQUA Consensus Layer
+  beacon1:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.beacon-mock
+    container_name: equa-beacon1
+    depends_on:
+      - validator1
+      - validator2
+      - validator3
+      - validator4
+      - validator5
+    networks:
+      equa-network:
+        ipv4_address: 172.25.0.201
+    volumes:
+      - validator1-data:/validator-data:ro
+    command:
+      - --execution-endpoint=http://172.25.0.101:8551
+      - --rpc-endpoint=http://172.25.0.101:8545
+      - --jwt-secret=/validator-data/geth/jwtsecret
+      - --block-time=6s
+      - --validator-id=1
+
+  beacon2:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.beacon-mock
+    container_name: equa-beacon2
+    depends_on:
+      - validator2
+    networks:
+      equa-network:
+        ipv4_address: 172.25.0.202
+    volumes:
+      - validator2-data:/validator-data:ro
+    command:
+      - --execution-endpoint=http://172.25.0.102:8551
+      - --rpc-endpoint=http://172.25.0.102:8545
+      - --jwt-secret=/validator-data/geth/jwtsecret
+      - --block-time=6s
+      - --validator-id=2
+
+  beacon3:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.beacon-mock
+    container_name: equa-beacon3
+    depends_on:
+      - validator3
+    networks:
+      equa-network:
+        ipv4_address: 172.25.0.203
+    volumes:
+      - validator3-data:/validator-data:ro
+    command:
+      - --execution-endpoint=http://172.25.0.103:8551
+      - --rpc-endpoint=http://172.25.0.103:8545
+      - --jwt-secret=/validator-data/geth/jwtsecret
+      - --block-time=6s
+      - --validator-id=3
+
+  beacon4:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.beacon-mock
+    container_name: equa-beacon4
+    depends_on:
+      - validator4
+    networks:
+      equa-network:
+        ipv4_address: 172.25.0.204
+    volumes:
+      - validator4-data:/validator-data:ro
+    command:
+      - --execution-endpoint=http://172.25.0.104:8551
+      - --rpc-endpoint=http://172.25.0.104:8545
+      - --jwt-secret=/validator-data/geth/jwtsecret
+      - --block-time=6s
+      - --validator-id=4
+
+  beacon5:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.beacon-mock
+    container_name: equa-beacon5
+    depends_on:
+      - validator5
+    networks:
+      equa-network:
+        ipv4_address: 172.25.0.205
+    volumes:
+      - validator5-data:/validator-data:ro
+    command:
+      - --execution-endpoint=http://172.25.0.105:8551
+      - --rpc-endpoint=http://172.25.0.105:8545
+      - --jwt-secret=/validator-data/geth/jwtsecret
+      - --block-time=6s
+      - --validator-id=5
+
+
+networks:
+  equa-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.25.0.0/24
+
+volumes:
+  bootnode-data:
+  validator1-data:
+  validator2-data:
+  validator3-data:
+  validator4-data:
+  validator5-data:
+  beacon1-data:
+  beacon2-data:
+  beacon3-data:
+  beacon4-data:
+  beacon5-data:
+

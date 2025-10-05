@@ -1,0 +1,38 @@
+# EQUA Beacon Chain Genesis State
+# Minimal genesis for testing
+
+# Genesis time (will be set by script)
+genesis_time: 0
+
+# Genesis validators root
+genesis_validators_root: 0x0000000000000000000000000000000000000000000000000000000000000000
+
+# Fork
+fork:
+  previous_version: 0x00003782
+  current_version: 0x00003782
+  epoch: 0
+
+# Latest block header
+latest_block_header:
+  slot: 0
+  proposer_index: 0
+  parent_root: 0x0000000000000000000000000000000000000000000000000000000000000000
+  state_root: 0x0000000000000000000000000000000000000000000000000000000000000000
+  body_root: 0x0000000000000000000000000000000000000000000000000000000000000000
+
+# Eth1
+eth1_data:
+  deposit_root: 0x0000000000000000000000000000000000000000000000000000000000000000
+  deposit_count: 5
+  block_hash: 0xa7a3e29117235c9cc62e43cb11ce581f87b3db32507adaab3edcec54663fa816
+
+# Validators (5 validators matching your setup)
+validators: []
+
+# Balances
+balances: []
+
+# Initialize empty arrays
+randao_mixes: []
+slashings: []
