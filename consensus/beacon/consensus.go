@@ -30,6 +30,7 @@ import (
 	"github.com/equa/go-equa/core/types"
 	"github.com/equa/go-equa/core/vm"
 	"github.com/equa/go-equa/params"
+	"github.com/equa/go-equa/rpc"
 	"github.com/equa/go-equa/trie"
 	"github.com/holiman/uint256"
 )
@@ -451,6 +452,11 @@ func (beacon *Beacon) CalcDifficulty(chain consensus.ChainHeaderReader, time uin
 // Close shutdowns the consensus engine
 func (beacon *Beacon) Close() error {
 	return beacon.ethone.Close()
+}
+
+// APIs implements consensus.Engine, returning the user facing RPC APIs.
+func (beacon *Beacon) APIs(chain consensus.ChainHeaderReader) []rpc.API {
+	return beacon.ethone.APIs(chain)
 }
 
 // IsPoSHeader reports the header belongs to the PoS-stage with some special fields.

@@ -41,6 +41,7 @@ import (
 	"github.com/equa/go-equa/log"
 	"github.com/equa/go-equa/params"
 	"github.com/equa/go-equa/rlp"
+	"github.com/equa/go-equa/rpc"
 	"github.com/equa/go-equa/trie"
 	"golang.org/x/crypto/sha3"
 )
@@ -637,6 +638,11 @@ func (c *Clique) SealHash(header *types.Header) common.Hash {
 
 // Close implements consensus.Engine. It's a noop for clique as there are no background threads.
 func (c *Clique) Close() error {
+	return nil
+}
+
+// APIs implements consensus.Engine, returning the user facing RPC APIs.
+func (c *Clique) APIs(chain consensus.ChainHeaderReader) []rpc.API {
 	return nil
 }
 

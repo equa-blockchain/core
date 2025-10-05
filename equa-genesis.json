@@ -13,18 +13,30 @@
     "londonBlock": 0,
     "arrowGlacierBlock": 0,
     "grayGlacierBlock": 0,
-    "terminalTotalDifficulty": 0,
-    "shanghaiTime": 0,
-    "cancunTime": 0,
-    "pragueTime": 0,
+    "terminalTotalDifficulty": 999999999999999999,
+    "shanghaiTime": null,
+    "cancunTime": null,
+    "pragueTime": null,
     "equa": {
       "period": 12,
       "epoch": 7200,
       "thresholdShares": 2,
       "mevBurnPercentage": 80,
       "powDifficulty": 1000000,
-      "validatorReward": "2000000000000000000",
+      "validatorReward": 2000000000000000000,
       "slashingPercentage": 50
+    },
+    "blobSchedule": {
+      "cancun": {
+        "target": 3,
+        "max": 6,
+        "baseFeeUpdateFraction": 1112826
+      },
+      "prague": {
+        "target": 6,
+        "max": 9,
+        "baseFeeUpdateFraction": 1112826
+      }
     }
   },
   "difficulty": "0x1",

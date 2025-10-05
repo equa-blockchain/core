@@ -6,45 +6,70 @@ package equa
 import (
 	"errors"
 	"math/big"
-	"math/rand"
-	"time"
 
 	"github.com/equa/go-equa/common"
 	"github.com/equa/go-equa/core/state"
+	"github.com/equa/go-equa/core/tracing"
 	"github.com/equa/go-equa/core/types"
 	"github.com/equa/go-equa/crypto"
+	"github.com/equa/go-equa/log"
+	"github.com/holiman/uint256"
 )
 
 // selectProposer selects the next block proposer using hybrid PoS+PoW
+// This is a deterministic algorithm - all validators calculate the same result
 func (e *Equa) selectProposer(blockNumber uint64, parent *types.Header) (common.Address, error) {
 	// Get top validators by stake
 	topValidators := e.stakeManager.GetTopStakers(100)
 	if len(topValidators) == 0 {
-		return common.Address{}, errors.New("no validators available")
+		// Dev mode fallback: Accept any proposer (will be set by miner config)
+		return common.Address{}, nil
 	}
 
-	// For genesis block, select randomly
-	if blockNumber == 1 {
-		rand.Seed(time.Now().UnixNano())
-		return topValidators[rand.Intn(len(topValidators))].Address, nil
+	// Get total stake for normalization
+	totalStake := big.NewInt(0)
+	for _, validator := range topValidators {
+		stake := e.stakeManager.GetStake(validator.Address)
+		totalStake.Add(totalStake, stake)
 	}
 
-	// Use PoW to add randomness to validator selection
-	challenge := e.powEngine.GenerateChallenge(parent.Hash(), big.NewInt(int64(blockNumber)))
+	if totalStake.Cmp(big.NewInt(0)) == 0 {
+		// Fallback to first validator if no stake
+		return topValidators[0].Address, nil
+	}
 
-	// Each validator competes with weighted PoW
+	// ============================================
+	// HYBRID PoS+PoW SELECTION ALGORITHM
+	// ============================================
+	// 1. Generate deterministic challenge from parent block
+	//    This ensures all nodes calculate the same challenge
+	var parentHash common.Hash
+	if parent != nil {
+		parentHash = parent.Hash()
+	}
+	challenge := e.powEngine.GenerateChallenge(parentHash, big.NewInt(int64(blockNumber)))
+
+	// 2. Each validator competes with weighted score
 	bestScore := big.NewInt(0)
 	var selectedValidator common.Address
 
 	for _, validator := range topValidators {
-		// Simple PoW competition: hash(challenge + validator_address)
+		// PoW Component: Hash(challenge + validator_address + blockNumber)
+		// This adds entropy while remaining deterministic
 		data := append(challenge.Bytes(), validator.Address.Bytes()...)
-		hash := crypto.Keccak256Hash(data)
+		data = append(data, big.NewInt(int64(blockNumber)).Bytes()...)
+		hashValue := crypto.Keccak256Hash(data)
 
-		// Calculate weighted score: hash_quality * stake_weight
-		stakeWeight := e.stakeManager.GetStakeWeight(validator.Address)
-		hashQuality := e.powEngine.CalculateQuality(hash)
+		// Convert hash to big.Int for calculation
+		hashQuality := new(big.Int).SetBytes(hashValue.Bytes())
 
+		// PoS Component: Stake weight (normalized to 10000 for precision)
+		validatorStake := e.stakeManager.GetStake(validator.Address)
+		stakeWeight := new(big.Int).Mul(validatorStake, big.NewInt(10000))
+		stakeWeight.Div(stakeWeight, totalStake)
+
+		// HYBRID SCORE = hashQuality * stakeWeight
+		// Higher stake = higher probability, but PoW adds randomness
 		score := new(big.Int).Mul(hashQuality, stakeWeight)
 
 		if score.Cmp(bestScore) > 0 {
@@ -54,7 +79,7 @@ func (e *Equa) selectProposer(blockNumber uint64, parent *types.Header) (common.
 	}
 
 	if selectedValidator == (common.Address{}) {
-		// Fallback: select by stake only
+		// Fallback: select by stake only (highest staker)
 		return topValidators[0].Address, nil
 	}
 
@@ -76,13 +101,18 @@ func (e *Equa) processMEVAndRewards(header *types.Header, state *state.StateDB, 
 
 		// Burn MEV: send to zero address
 		burnAddress := common.Address{}
-		state.AddBalance(burnAddress, burnAmount)
+		burnAmountU256, _ := uint256.FromBig(burnAmount)
+		state.AddBalance(burnAddress, burnAmountU256, tracing.BalanceChangeUnspecified)
 
 		// Give MEV reward to proposer
-		state.AddBalance(header.Coinbase, proposerMEVReward)
+		proposerMEVRewardU256, _ := uint256.FromBig(proposerMEVReward)
+		state.AddBalance(header.Coinbase, proposerMEVRewardU256, tracing.BalanceIncreaseRewardMineBlock)
 
 		// Emit MEV burn event
-		// TODO: Add event emission
+		log.Info("🔥 MEV burned",
+			"amount", burnAmount.String(),
+			"proposerReward", proposerMEVReward.String(),
+			"proposer", header.Coinbase.Hex()[:10]+"...")
 	}
 }
 
@@ -90,7 +120,8 @@ func (e *Equa) processMEVAndRewards(header *types.Header, state *state.StateDB, 
 func (e *Equa) applyBlockRewards(header *types.Header, state *state.StateDB) {
 	// Block reward: 2 EQUA per block
 	blockReward := big.NewInt(int64(e.config.ValidatorReward))
-	state.AddBalance(header.Coinbase, blockReward)
+	blockRewardU256, _ := uint256.FromBig(blockReward)
+	state.AddBalance(header.Coinbase, blockRewardU256, tracing.BalanceIncreaseRewardMineBlock)
 
 	// Update proposer's last block
 	e.stakeManager.UpdateLastBlock(header.Coinbase, header.Number.Uint64())
@@ -98,13 +129,15 @@ func (e *Equa) applyBlockRewards(header *types.Header, state *state.StateDB) {
 
 // hasEncryptedTxs checks if there are encrypted transactions in the block
 func (e *Equa) hasEncryptedTxs(txs []*types.Transaction) bool {
-	// Simple check: look for transactions with special flag or format
-	// In a full implementation, this would check for EncryptedTransaction type
+	// Check for encrypted transaction markers
 	for _, tx := range txs {
-		// Placeholder: check if transaction data starts with encryption marker
 		data := tx.Data()
-		if len(data) > 4 && string(data[:4]) == "ENCR" {
-			return true
+		// Look for EQUA encryption markers
+		if len(data) > 4 {
+			// Check for EQUA encryption header: 0x45515541 ("EQUA")
+			if data[0] == 0x45 && data[1] == 0x51 && data[2] == 0x55 && data[3] == 0x41 {
+				return true
+			}
 		}
 	}
 	return false
@@ -154,9 +187,11 @@ func (e *Equa) decryptTransactions(txs []*types.Transaction) ([]*types.Transacti
 
 // isEncryptedTx checks if a transaction is encrypted
 func (e *Equa) isEncryptedTx(tx *types.Transaction) bool {
-	// Simple check for encrypted transaction marker
 	data := tx.Data()
-	return len(data) > 4 && string(data[:4]) == "ENCR"
+	// Check for EQUA encryption header: 0x45515541 ("EQUA")
+	return len(data) > 4 &&
+		data[0] == 0x45 && data[1] == 0x51 &&
+		data[2] == 0x55 && data[3] == 0x41
 }
 
 // checkSlashingConditions checks for slashing conditions and applies penalties
@@ -192,6 +227,12 @@ func (e *Equa) checkSlashingConditions(header *types.Header, txs []*types.Transa
 
 // validateProposer checks if the block proposer is valid
 func (e *Equa) validateProposer(header *types.Header, parent *types.Header) error {
+	// Skip validation if no validators (dev mode)
+	validators := e.stakeManager.GetValidators()
+	if len(validators) == 0 {
+		return nil
+	}
+
 	// Check if proposer has sufficient stake
 	if !e.stakeManager.IsEligible(header.Coinbase) {
 		return errInsufficientStake

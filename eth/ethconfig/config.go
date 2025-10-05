@@ -173,7 +173,7 @@ func CreateConsensusEngine(config *params.ChainConfig, db ethdb.Database) (conse
 	// Check for EQUA consensus engine first
 	if config.Equa != nil {
 		log.Info("Starting EQUA consensus engine", "chainID", config.ChainID)
-		return equa.New(config.Equa, db), nil
+		return equa.New(config.Equa, config, db), nil
 	}
 
 	if config.TerminalTotalDifficulty == nil {

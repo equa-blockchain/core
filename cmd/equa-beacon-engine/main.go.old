@@ -1,0 +1,531 @@
+// Copyright 2024 The go-equa Authors
+// EQUA Beacon Mock - Simplified Consensus Layer for EQUA Network
+// This replaces a full beacon client (like Prysm) with a lightweight service
+// that triggers block production using Engine API
+
+package main
+
+import (
+	"bytes"
+	"context"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"io"
+	"math/big"
+	"net/http"
+	"os"
+	"strings"
+	"time"
+
+	"github.com/equa/go-equa/common"
+	"github.com/equa/go-equa/common/hexutil"
+	"github.com/equa/go-equa/log"
+)
+
+var (
+	executionEndpoint = flag.String("execution-endpoint", "http://localhost:8551", "Execution layer Engine API endpoint")
+	jwtSecret         = flag.String("jwt-secret", "", "Path to JWT secret file")
+	blockTime         = flag.Duration("block-time", 0, "Time between blocks (0 = auto-detect from genesis)")
+	validatorID       = flag.Int("validator-id", 1, "Validator ID (1-5)")
+	validatorAddress  = flag.String("validator-address", "", "Validator address (if empty, uses ID-based address)")
+	rpcEndpoint       = flag.String("rpc-endpoint", "", "HTTP RPC endpoint for validator queries (defaults to execution-endpoint)")
+)
+
+// EngineAPI handles communication with Geth via Engine API
+type EngineAPI struct {
+	endpoint    string
+	rpcEndpoint string
+	client      *http.Client
+	jwtToken    string
+}
+
+// ValidatorInfo contains info about a validator
+type ValidatorInfo struct {
+	Address common.Address
+	Stake   *big.Int
+	Active  bool
+}
+
+// PayloadAttributes contains attributes for building a new payload
+type PayloadAttributes struct {
+	Timestamp             hexutil.Uint64  `json:"timestamp"`
+	Random                common.Hash     `json:"prevRandao"`
+	SuggestedFeeRecipient common.Address  `json:"suggestedFeeRecipient"`
+	Withdrawals           *[]interface{}  `json:"withdrawals,omitempty"`
+}
+
+// ForkchoiceState represents the current head of the chain
+type ForkchoiceState struct {
+	HeadBlockHash      common.Hash `json:"headBlockHash"`
+	SafeBlockHash      common.Hash `json:"safeBlockHash"`
+	FinalizedBlockHash common.Hash `json:"finalizedBlockHash"`
+}
+
+// ForkchoiceResponse is the response from engine_forkchoiceUpdatedV3
+type ForkchoiceResponse struct {
+	PayloadStatus struct {
+		Status          string      `json:"status"`
+		LatestValidHash common.Hash `json:"latestValidHash"`
+	} `json:"payloadStatus"`
+	PayloadID *hexutil.Bytes `json:"payloadId"`
+}
+
+func main() {
+	flag.Parse()
+
+	// Setup logging
+	glogger := log.NewGlogHandler(log.NewTerminalHandler(os.Stderr, false))
+	glogger.Verbosity(log.LvlInfo)
+	log.SetDefault(log.NewLogger(glogger))
+
+	// Determine validator address
+	var myAddress common.Address
+	if *validatorAddress != "" {
+		myAddress = common.HexToAddress(*validatorAddress)
+	} else {
+		// Default: use validator ID to generate address
+		myAddress = common.HexToAddress(fmt.Sprintf("0x000000000000000000000000000000000000000%d", *validatorID))
+	}
+
+	log.Info("🔷 Starting EQUA Beacon Mock", "validator", *validatorID, "address", myAddress.Hex(), "endpoint", *executionEndpoint)
+
+	// Read JWT secret
+	jwtToken, err := readJWTSecret(*jwtSecret)
+	if err != nil {
+		log.Crit("Failed to read JWT secret", "error", err)
+	}
+
+	// Determine RPC endpoint
+	rpcAddr := *rpcEndpoint
+	if rpcAddr == "" {
+		// Try to derive from execution endpoint (replace 8551 with 8545)
+		rpcAddr = *executionEndpoint
+		if len(rpcAddr) > 4 {
+			rpcAddr = rpcAddr[:len(rpcAddr)-4] + "8545"
+		}
+	}
+
+	log.Info("🔧 Endpoints configured", "execution", *executionEndpoint, "rpc", rpcAddr)
+
+	engine := &EngineAPI{
+		endpoint:    *executionEndpoint,
+		rpcEndpoint: rpcAddr,
+		client:      &http.Client{Timeout: 10 * time.Second},
+		jwtToken:    jwtToken,
+	}
+
+	// Wait for execution layer to be ready
+	log.Info("⏳ Waiting for execution layer...")
+	if err := engine.waitForReady(); err != nil {
+		log.Crit("Execution layer not ready", "error", err)
+	}
+	log.Info("✅ Execution layer ready")
+
+	// Auto-detect block time from genesis if not specified
+	if *blockTime == 0 {
+		period, err := engine.getBlockPeriod()
+		if err != nil {
+			log.Warn("Could not fetch block period from genesis, using default", "error", err)
+			*blockTime = 12 * time.Second
+		} else {
+			*blockTime = time.Duration(period) * time.Second
+			log.Info("📡 Block period auto-detected from genesis", "period", period, "blockTime", *blockTime)
+		}
+	}
+
+	// Get initial head
+	head, err := engine.getLatestBlock()
+	if err != nil {
+		log.Warn("Could not get initial head, using genesis", "error", err)
+		head = common.Hash{} // Genesis
+	}
+
+	log.Info("🚀 Starting block production", "blockTime", *blockTime, "initialHead", head.Hex())
+
+	// Block production loop with validator selection
+	ticker := time.NewTicker(*blockTime)
+	defer ticker.Stop()
+
+	slotNumber := uint64(0)
+
+	for range ticker.C {
+		slotNumber++
+
+		// Get active validators
+		validators, err := engine.getActiveValidators()
+		if err != nil {
+			log.Warn("Could not get validators, using fallback", "error", err)
+			validators = []ValidatorInfo{{Address: myAddress, Active: true}}
+		}
+
+		// Determine proposer for this slot (round-robin)
+		proposer := selectProposer(validators, slotNumber)
+
+		// Only produce block if we are the proposer
+		if proposer.Address != myAddress {
+			log.Debug("Not our turn to propose", "slot", slotNumber, "proposer", proposer.Address.Hex())
+			continue
+		}
+
+		log.Info("🎯 Our turn to propose", "slot", slotNumber, "validators", len(validators))
+
+		if err := engine.produceBlock(head); err != nil {
+			log.Error("Failed to produce block", "error", err)
+		} else {
+			// Update head
+			newHead, _ := engine.getLatestBlock()
+			if newHead != head {
+				head = newHead
+				log.Info("📦 New block produced", "slot", slotNumber, "hash", head.Hex()[:10])
+			}
+		}
+	}
+}
+
+// selectProposer selects validator for this slot using weighted round-robin
+func selectProposer(validators []ValidatorInfo, slot uint64) ValidatorInfo {
+	if len(validators) == 0 {
+		return ValidatorInfo{}
+	}
+
+	// Simple round-robin by slot
+	// In production, this would be weighted by stake
+	activeValidators := make([]ValidatorInfo, 0)
+	for _, v := range validators {
+		if v.Active {
+			activeValidators = append(activeValidators, v)
+		}
+	}
+
+	if len(activeValidators) == 0 {
+		return validators[0]
+	}
+
+	index := slot % uint64(len(activeValidators))
+	return activeValidators[index]
+}
+
+func (e *EngineAPI) waitForReady() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("timeout waiting for execution layer")
+		default:
+			if _, err := e.getLatestBlock(); err == nil {
+				return nil
+			}
+			time.Sleep(2 * time.Second)
+		}
+	}
+}
+
+func (e *EngineAPI) getLatestBlock() (common.Hash, error) {
+	result, err := e.callRPC("eth_getBlockByNumber", []interface{}{"latest", false})
+	if err != nil {
+		return common.Hash{}, err
+	}
+
+	if result == nil {
+		return common.Hash{}, nil // Genesis block
+	}
+
+	block, ok := result.(map[string]interface{})
+	if !ok {
+		return common.Hash{}, fmt.Errorf("invalid block format")
+	}
+
+	hashStr, ok := block["hash"].(string)
+	if !ok {
+		return common.Hash{}, fmt.Errorf("no hash in block")
+	}
+
+	return common.HexToHash(hashStr), nil
+}
+
+func (e *EngineAPI) getBlockPeriod() (uint64, error) {
+	// Try to call EQUA-specific RPC method to get block period
+	result, err := e.callRPC("equa_getBlockPeriod", []interface{}{})
+	if err != nil {
+		return 0, fmt.Errorf("failed to get block period: %w", err)
+	}
+
+	// Parse period from result
+	periodStr, ok := result.(string)
+	if ok {
+		// Handle hex string
+		if len(periodStr) > 2 && periodStr[:2] == "0x" {
+			periodInt := new(big.Int)
+			periodInt.SetString(periodStr[2:], 16)
+			return periodInt.Uint64(), nil
+		}
+		// Handle decimal string
+		periodInt := new(big.Int)
+		periodInt.SetString(periodStr, 10)
+		return periodInt.Uint64(), nil
+	}
+
+	// Try as float64 (JSON number)
+	periodFloat, ok := result.(float64)
+	if ok {
+		return uint64(periodFloat), nil
+	}
+
+	return 0, fmt.Errorf("unexpected period format: %T", result)
+}
+
+func (e *EngineAPI) getActiveValidators() ([]ValidatorInfo, error) {
+	// Try to call EQUA-specific RPC method to get validators
+	result, err := e.callRPC("equa_getValidators", []interface{}{})
+	if err != nil {
+		// Fallback: try eth_accounts or return default validators
+		return e.getDefaultValidators()
+	}
+
+	// Parse validator list
+	validators := make([]ValidatorInfo, 0)
+	validatorList, ok := result.([]interface{})
+	if !ok {
+		return e.getDefaultValidators()
+	}
+
+	for _, v := range validatorList {
+		vMap, ok := v.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		addr := common.HexToAddress(vMap["address"].(string))
+		active := true
+		if activeVal, ok := vMap["active"].(bool); ok {
+			active = activeVal
+		}
+
+		stake := big.NewInt(0)
+		if stakeStr, ok := vMap["stake"].(string); ok {
+			stake, _ = new(big.Int).SetString(stakeStr, 0)
+		}
+
+		validators = append(validators, ValidatorInfo{
+			Address: addr,
+			Stake:   stake,
+			Active:  active,
+		})
+	}
+
+	if len(validators) == 0 {
+		return e.getDefaultValidators()
+	}
+
+	return validators, nil
+}
+
+func (e *EngineAPI) getDefaultValidators() ([]ValidatorInfo, error) {
+	// Default: 5 validators with addresses 0x...0001 through 0x...0005
+	validators := make([]ValidatorInfo, 5)
+	stake := new(big.Int)
+	stake.SetString("32000000000000000000", 10) // 32 ETH
+
+	for i := 0; i < 5; i++ {
+		validators[i] = ValidatorInfo{
+			Address: common.HexToAddress(fmt.Sprintf("0x000000000000000000000000000000000000000%d", i+1)),
+			Stake:   new(big.Int).Set(stake),
+			Active:  true,
+		}
+	}
+	return validators, nil
+}
+
+func (e *EngineAPI) produceBlock(parentHash common.Hash) error {
+	// Generate random value for PoW
+	randomBytes := make([]byte, 32)
+	rand.Read(randomBytes)
+	random := common.BytesToHash(randomBytes)
+
+	// Build payload attributes (without withdrawals for pre-Shanghai)
+	attrs := PayloadAttributes{
+		Timestamp:             hexutil.Uint64(time.Now().Unix()),
+		Random:                random,
+		SuggestedFeeRecipient: common.HexToAddress(fmt.Sprintf("0x000000000000000000000000000000000000000%d", *validatorID)),
+		Withdrawals:           nil, // Not using withdrawals
+	}
+
+	// Forkchoice update
+	fcs := ForkchoiceState{
+		HeadBlockHash:      parentHash,
+		SafeBlockHash:      parentHash,
+		FinalizedBlockHash: parentHash,
+	}
+
+	result, err := e.call("engine_forkchoiceUpdatedV2", []interface{}{fcs, attrs})
+	if err != nil {
+		return fmt.Errorf("forkchoiceUpdated failed: %w", err)
+	}
+
+	response := result.(map[string]interface{})
+	status := response["payloadStatus"].(map[string]interface{})["status"].(string)
+
+	if status != "VALID" && status != "SYNCING" {
+		return fmt.Errorf("invalid payload status: %s", status)
+	}
+
+	// Get payload ID
+	payloadIDHex, ok := response["payloadId"].(string)
+	if !ok {
+		return fmt.Errorf("no payload ID returned")
+	}
+
+	// Wait a bit for payload to be built
+	time.Sleep(500 * time.Millisecond)
+
+	// Get the payload
+	payload, err := e.call("engine_getPayloadV2", []interface{}{payloadIDHex})
+	if err != nil {
+		return fmt.Errorf("getPayload failed: %w", err)
+	}
+
+	// Submit payload for execution
+	executionPayload := payload.(map[string]interface{})["executionPayload"]
+	newPayloadResp, err := e.call("engine_newPayloadV2", []interface{}{executionPayload})
+	if err != nil {
+		return fmt.Errorf("newPayload failed: %w", err)
+	}
+
+	// Get the new block hash
+	newBlock := executionPayload.(map[string]interface{})
+	newBlockHash := common.HexToHash(newBlock["blockHash"].(string))
+
+	// Update forkchoice to move head to new block
+	newFcs := ForkchoiceState{
+		HeadBlockHash:      newBlockHash,
+		SafeBlockHash:      newBlockHash,
+		FinalizedBlockHash: parentHash, // Keep parent as finalized
+	}
+	_, err = e.call("engine_forkchoiceUpdatedV2", []interface{}{newFcs, nil})
+	if err != nil {
+		log.Warn("Failed to update forkchoice to new block", "error", err, "hash", newBlockHash.Hex()[:10])
+	}
+
+	log.Info("✨ Block produced", "number", newBlock["blockNumber"], "hash", newBlockHash.Hex()[:10], "status", newPayloadResp)
+	return nil
+}
+
+func (e *EngineAPI) call(method string, params []interface{}) (interface{}, error) {
+	return e.callToEndpoint(e.endpoint, method, params, true)
+}
+
+func (e *EngineAPI) callRPC(method string, params []interface{}) (interface{}, error) {
+	return e.callToEndpoint(e.rpcEndpoint, method, params, false)
+}
+
+func (e *EngineAPI) callToEndpoint(endpoint, method string, params []interface{}, useJWT bool) (interface{}, error) {
+	reqBody := map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  method,
+		"params":  params,
+	}
+
+	bodyBytes, _ := json.Marshal(reqBody)
+	req, err := http.NewRequest("POST", endpoint, bytes.NewReader(bodyBytes))
+	if err != nil {
+		log.Debug("Failed to create request", "error", err, "endpoint", endpoint)
+		return nil, err
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	if useJWT && e.jwtToken != "" {
+		// Generate fresh JWT token
+		jwtToken, err := generateJWT(e.jwtToken)
+		if err != nil {
+			log.Debug("Failed to generate JWT", "error", err)
+			return nil, err
+		}
+		req.Header.Set("Authorization", "Bearer "+jwtToken)
+	}
+
+	resp, err := e.client.Do(req)
+	if err != nil {
+		log.Debug("HTTP request failed", "error", err, "endpoint", endpoint, "method", method)
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	// Read response body for debugging
+	var bodyBuf bytes.Buffer
+	bodyReader := io.TeeReader(resp.Body, &bodyBuf)
+
+	var result map[string]interface{}
+	if err := json.NewDecoder(bodyReader).Decode(&result); err != nil {
+		bodyStr := bodyBuf.String()
+		if len(bodyStr) > 500 {
+			bodyStr = bodyStr[:500] + "..."
+		}
+		log.Debug("Failed to decode response", "error", err, "endpoint", endpoint, "body", bodyStr)
+		return nil, err
+	}
+
+	if errObj, ok := result["error"]; ok {
+		log.Debug("RPC error", "error", errObj, "method", method)
+		return nil, fmt.Errorf("RPC error: %v", errObj)
+	}
+
+	return result["result"], nil
+}
+
+func readJWTSecret(path string) (string, error) {
+	if path == "" {
+		return "", nil
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+
+	// Trim whitespace and newlines
+	token := string(data)
+	token = strings.TrimSpace(token)
+
+	return token, nil
+}
+
+// generateJWT creates a JWT token for Engine API authentication
+func generateJWT(secret string) (string, error) {
+	// JWT header
+	header := map[string]string{
+		"alg": "HS256",
+		"typ": "JWT",
+	}
+	headerJSON, _ := json.Marshal(header)
+	headerB64 := base64.RawURLEncoding.EncodeToString(headerJSON)
+
+	// JWT payload with iat (issued at) claim
+	payload := map[string]interface{}{
+		"iat": time.Now().Unix(),
+	}
+	payloadJSON, _ := json.Marshal(payload)
+	payloadB64 := base64.RawURLEncoding.EncodeToString(payloadJSON)
+
+	// Decode hex secret
+	secretBytes, err := hex.DecodeString(secret)
+	if err != nil {
+		return "", fmt.Errorf("invalid hex secret: %w", err)
+	}
+
+	// Sign with HMAC-SHA256
+	message := headerB64 + "." + payloadB64
+	h := hmac.New(sha256.New, secretBytes)
+	h.Write([]byte(message))
+	signature := base64.RawURLEncoding.EncodeToString(h.Sum(nil))
+
+	return message + "." + signature, nil
+}

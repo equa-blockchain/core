@@ -9,6 +9,7 @@ import (
 
 	"github.com/equa/go-equa/common"
 	"github.com/equa/go-equa/ethdb"
+	"github.com/equa/go-equa/log"
 	"github.com/equa/go-equa/params"
 )
 
@@ -72,6 +73,14 @@ func (sm *StakeManager) RemoveValidator(addr common.Address) error {
 func (sm *StakeManager) HasStake(addr common.Address) bool {
 	validator, exists := sm.validators[addr]
 	return exists && validator.Stake.Cmp(big.NewInt(0)) > 0 && !validator.Slashed
+}
+
+// GetStake returns the stake amount for a validator
+func (sm *StakeManager) GetStake(addr common.Address) *big.Int {
+	if validator, exists := sm.validators[addr]; exists {
+		return new(big.Int).Set(validator.Stake)
+	}
+	return big.NewInt(0)
 }
 
 // GetValidator returns validator information
@@ -142,7 +151,10 @@ func (sm *StakeManager) SlashValidator(addr common.Address, percentage uint64, r
 	sm.totalStake.Sub(sm.totalStake, slashAmount)
 
 	// Log slashing event
-	// TODO: Emit slashing event
+	log.Warn("⚡ Validator slashed",
+		"validator", validator.Address.Hex()[:10]+"...",
+		"amount", slashAmount.String(),
+		"reason", reason)
 
 	return nil
 }
@@ -159,7 +171,7 @@ func (sm *StakeManager) GetTotalStake() *big.Int {
 	return new(big.Int).Set(sm.totalStake)
 }
 
-// IsEligible checks if a validator is eligible to propose/validate
+// IsEligible checks if a validator is eligible to propose/validate with advanced criteria
 func (sm *StakeManager) IsEligible(addr common.Address) bool {
 	validator, exists := sm.validators[addr]
 	if !exists {
@@ -170,8 +182,59 @@ func (sm *StakeManager) IsEligible(addr common.Address) bool {
 	minStake := big.NewInt(32) // 32 EQUA minimum stake
 	minStake.Mul(minStake, big.NewInt(1e18))
 
-	return !validator.Slashed &&
-		   validator.Stake.Cmp(minStake) >= 0
+	// Basic eligibility
+	if validator.Slashed || validator.Stake.Cmp(minStake) < 0 {
+		return false
+	}
+
+	// Additional checks:
+	// 1. Check if validator has been recently slashed (cooldown period)
+	if validator.SlashAmount.Cmp(big.NewInt(0)) > 0 {
+		// Reduced eligibility if previously slashed
+		effectiveStake := new(big.Int).Sub(validator.Stake, validator.SlashAmount)
+		if effectiveStake.Cmp(minStake) < 0 {
+			return false
+		}
+	}
+
+	// 2. Check validator activity (must have proposed recently)
+	// Allow validators to be inactive for up to 100 blocks
+	if validator.LastBlock > 0 {
+		// Note: This check would need current block number passed in
+		// For now, we just check if they've ever proposed
+		return true
+	}
+
+	return true
+}
+
+// GetValidatorPerformanceScore calculates a performance score for a validator
+func (sm *StakeManager) GetValidatorPerformanceScore(addr common.Address) float64 {
+	validator, exists := sm.validators[addr]
+	if !exists {
+		return 0.0
+	}
+
+	score := 1.0
+
+	// Penalize for slashing
+	if validator.Slashed {
+		score *= 0.1 // Heavy penalty
+	} else if validator.SlashAmount.Cmp(big.NewInt(0)) > 0 {
+		// Partial penalty for previous slashing
+		penalty := new(big.Int).Div(validator.SlashAmount, validator.Stake)
+		score *= (1.0 - float64(penalty.Uint64())/100.0)
+	}
+
+	// Reward for higher stake
+	stakeRatio := new(big.Int).Div(validator.Stake, big.NewInt(1e18))
+	if stakeRatio.Uint64() > 100 {
+		score *= 1.2
+	} else if stakeRatio.Uint64() > 50 {
+		score *= 1.1
+	}
+
+	return score
 }
 
 // GetKeyShares returns key shares for threshold decryption

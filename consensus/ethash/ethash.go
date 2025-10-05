@@ -22,6 +22,7 @@ import (
 
 	"github.com/equa/go-equa/consensus"
 	"github.com/equa/go-equa/core/types"
+	"github.com/equa/go-equa/rpc"
 )
 
 // Ethash is a consensus engine based on proof-of-work implementing the ethash
@@ -67,6 +68,11 @@ func NewFullFaker() *Ethash {
 
 // Close closes the exit channel to notify all backend threads exiting.
 func (ethash *Ethash) Close() error {
+	return nil
+}
+
+// APIs implements consensus.Engine, returning the user facing RPC APIs.
+func (ethash *Ethash) APIs(chain consensus.ChainHeaderReader) []rpc.API {
 	return nil
 }
 

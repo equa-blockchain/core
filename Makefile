@@ -2,7 +2,7 @@
 # with Go source code. If you know what GOPATH is then you probably
 # don't need to bother with make.
 
-.PHONY: geth evm all test lint fmt clean devtools help
+.PHONY: geth evm beacon all test lint fmt clean devtools help
 
 GOBIN = ./build/bin
 GO ?= latest
@@ -19,6 +19,12 @@ evm:
 	$(GORUN) build/ci.go install ./cmd/evm
 	@echo "Done building."
 	@echo "Run \"$(GOBIN)/evm\" to launch evm."
+
+#? beacon: Build EQUA Beacon Engine.
+beacon:
+	$(GORUN) build/ci.go install ./cmd/equa-beacon-engine
+	@echo "Done building EQUA Beacon Engine."
+	@echo "Run \"$(GOBIN)/equa-beacon-engine\" to launch the beacon engine."
 
 #? all: Build all packages and executables.
 all:
